@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0001 · Batching: block atau throw?</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<header class="lesson">
+  <div class="kicker">Week 1 · Day 2 · Producer internals</div>
+  <h1>Batching: apa yang <em>block</em>, apa yang <em>throw</em>?</h1>
+  <p class="lede">Bila link WAN dari edge ke Confluent Cloud putus, producer korang tak terus fail. Dia simpan dulu data tu. Lesson ni pasal apa jadi bila tempat simpan tu dah penuh.</p>
+</header>
+
+<div class="note">
+  <strong>Teka dulu (30 saat):</strong> link edge → broker putus 3 minit. Apa jadi kat <code>producer.produce()</code> dalam <code>clients/producer.py</code> korang? Tulis jawapan kat kertas dulu, baru scroll. Teka salah pun takpe, otak jadi lagi senang ingat lepas ni.
+</div>
+
+<h2>1. Bila batch keluar?</h2>
+<p>Recap <a href="../videos/kafka-producer-send-path/renders/video.mp4">Day 1</a>: <code>send()</code> cuma <em>append</em> record masuk satu batch per partition dalam <strong>RecordAccumulator</strong>. Yang betul² hantar ke broker ialah sender thread, kemudian. Batch tu dikira <em>ready</em> bila jadi salah satu dari 3 ni:</p>
+<ol>
+  <li><strong>Penuh:</strong> record seterusnya dah tak muat dalam <code>batch.size</code> (default 16384 bytes).</li>
+  <li><strong>Dah tunggu lama:</strong> batch dah tunggu <code>linger.ms</code> (default <strong>5</strong> dalam Kafka 4.x; versi lama default 0).</li>
+  <li><strong>Memori habis:</strong> ada <code>send()</code> lain tengah stuck tunggu memori, so semua batch terus dihantar.</li>
+</ol>
+<p><cite class="src">Sumber: <a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/clients/producer/internals/RecordAccumulator.java#L603-L615"><code>RecordAccumulator.batchReady()</code></a> (full, expired, exhausted) dan <a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/clients/producer/ProducerConfig.java#L393-L397">defaults dalam <code>ProducerConfig</code></a>.</cite></p>
+<p>Pasal <code>compression.type</code> pulak: dia compress record <em>sebelum</em> masuk kira dalam batch. So lagi banyak record boleh muat dalam <code>batch.size</code> yang sama. Kesannya, batch jarang keluar sbb penuh, lagi selalu keluar sbb <code>linger.ms</code> dah habis. <cite class="src">(<a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java#L1022">saiz record dianggar ikut <code>compression.type</code></a>)</cite></p>
+
+<h2>2. Memori terhad: Java <em>block</em> dulu, lepas tu fail ikut callback</h2>
+<p>Semua batch dalam Java producer ambil memori dari satu kolam, saiz dia <code>buffer.memory</code> (default 32 MB). Kalau broker tak ambik batch, memori tu tak dipulangkan. Lama-lama, kolam tu kering.</p>
+
+<figure>
+<svg viewBox="0 0 640 210" role="img" aria-label="Aliran send() Java: kalau ada memori, record di-append; kalau takde, send() block sampai max.block.ms, lepas tu fail ikut callback dan Future." font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" fill="none" stroke="currentColor">
+  <rect x="10" y="80" width="110" height="44" rx="6"/><text x="65" y="107" text-anchor="middle" fill="currentColor" stroke="none">send()</text>
+  <path d="M120 102 H170"/><path d="M164 97 L170 102 L164 107"/>
+  <rect x="170" y="74" width="140" height="56" rx="6"/><text x="240" y="98" text-anchor="middle" fill="currentColor" stroke="none">ada memori dalam</text><text x="240" y="116" text-anchor="middle" fill="currentColor" stroke="none">buffer.memory?</text>
+  <path d="M310 92 L360 40 H380"/><path d="M374 35 L380 40 L374 45"/>
+  <text x="348" y="74" fill="currentColor" stroke="none" font-size="12">ada</text>
+  <rect x="380" y="18" width="250" height="44" rx="6"/><text x="505" y="45" text-anchor="middle" fill="currentColor" stroke="none">append ke batch · return Future</text>
+  <path d="M310 112 L360 164 H380"/><path d="M374 159 L380 164 L374 169"/>
+  <text x="296" y="156" fill="currentColor" stroke="none" font-size="12">takde</text>
+  <rect x="380" y="128" width="250" height="72" rx="6" stroke-dasharray="4 3"/>
+  <text x="505" y="152" text-anchor="middle" fill="currentColor" stroke="none">BLOCK ≤ max.block.ms (60 s)</text>
+  <text x="505" y="172" text-anchor="middle" fill="currentColor" stroke="none">masih penuh → TimeoutException</text>
+  <text x="505" y="190" text-anchor="middle" fill="currentColor" stroke="none">ke callback + Future (bukan throw)</text>
+</svg>
+<figcaption>Masa tunggu metadata pun ditolak dari bajet <code>max.block.ms</code> yang sama tau.</figcaption>
+</figure>
+
+<p>Ok ni part yang ramai kena tipu. Bila <code>send()</code> fail, ada <strong>2 jalan</strong> error tu sampai kat korang:</p>
+<ul>
+  <li><strong>Jalan A: throw.</strong> Exception tercampak keluar dari <code>send()</code> tu sendiri. <code>try/catch</code> keliling <code>send()</code> boleh tangkap.</li>
+  <li><strong>Jalan B: callback + Future.</strong> <code>send()</code> return macam biasa, takde apa². Error tu dihantar ke callback korang, atau keluar bila panggil <code>future.get()</code>.</li>
+</ul>
+<p>Rule dia simple je, ikut jenis exception. Kalau <code>ApiException</code>, maksudnya "gagal hantar record ni", so dia ikut <strong>jalan B</strong>. <code>KafkaException</code> lain pulak maksudnya "program korang ada bug", so dia ikut <strong>jalan A</strong>. <code>BufferExhaustedException</code> tu subclass <code>TimeoutException</code>, dan <code>TimeoutException</code> ialah sejenis <code>ApiException</code>, so dia <strong>tak</strong> di-throw dari <code>send()</code>.</p>
+<p><cite class="src">Sumber: <a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/clients/producer/internals/BufferPool.java#L161">BufferPool.allocate()</a> · <a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java#L1049-L1073">KafkaProducer.doSend() catch blocks</a> · <a href="https://kafka.apache.org/documentation/#producerconfigs_max.block.ms">max.block.ms docs</a></cite></p>
+
+<table>
+  <tr><th>Simptom dalam app Java</th><th>Punca</th><th>Macam mana dia muncul</th></tr>
+  <tr><td><code>send()</code> lambat return</td><td>tunggu metadata atau memori</td><td><strong>block</strong>, paling lama <code>max.block.ms</code></td></tr>
+  <tr><td>Callback dapat <code>TimeoutException</code></td><td>memori masih penuh lepas <code>max.block.ms</code></td><td>jalan B: callback + Future</td></tr>
+  <tr><td>Callback dapat <code>RecordTooLargeException</code></td><td>record &gt; <code>max.request.size</code> atau &gt; <code>buffer.memory</code></td><td>jalan B, terus serta-merta</td></tr>
+  <tr><td><code>send()</code> sendiri campak exception</td><td>serializer fail, thread kena interrupt, producer dah closed/fatal</td><td>jalan A: <strong>throw</strong> (<code>SerializationException</code>, <code>InterruptException</code>, <code>KafkaException</code>)</td></tr>
+</table>
+<p class="note"><strong>Kenapa SRE kena peduli:</strong> kalau app panggil <code>send()</code> tanpa callback dan takde siapa check Future, semua error jalan B <strong>hilang senyap</strong>. Takde log, takde alert. Rule of thumb: jgn skip callback.</p>
+
+<h2>3. Producer edge korang (librdkafka) lain perangai</h2>
+<p>Client Python dalam lab guna librdkafka. Dia <strong>takde</strong> <code>buffer.memory</code>, <strong>takde</strong> <code>max.block.ms</code>. Ganti dia ada satu queue local, dihadkan oleh <code>queue.buffering.max.messages</code> (default 100000) dan <code>queue.buffering.max.kbytes</code> (default 1048576 KB). Bila queue penuh, <code>produce()</code> terus <strong>raise <code>BufferError</code></strong>. Takde tunggu langsung.</p>
+<p><cite class="src">Sumber: <a href="https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md">librdkafka CONFIGURATION.md</a> · <a href="https://docs.confluent.io/platform/current/clients/confluent-kafka-python/html/index.html#confluent_kafka.Producer.produce"><code>Producer.produce</code>: "Raises BufferError … queue.buffering.max.messages exceeded"</a></cite></p>
+<p>Ni apa yang <code>clients/producer.py</code> korang buat bila kena <code>BufferError</code>:</p>
+<pre><code>except BufferError:
+    # Local queue full: wait for deliveries, then retry
+    producer.poll(0.1)</code></pre>
+<p>Plot twist: code ni sebenarnya buat "block" sendiri, dan takde had masa langsung. Dalam masa yang sama, setiap mesej dalam queue ada jam sendiri. Dalam <code>edge-producer.properties</code> korang, <code>delivery.timeout.ms=120000</code>. Bila mesej dah expired, dia dilaporkan fail melalui <code>on_delivery</code>, dan tempat dia dalam queue dikosongkan.</p>
+
+<h2>4. Latihan</h2>
+<p>Jawab ikut ingatan. Jgn scroll atas dulu, no cheating 👀</p>
+<div class="quiz"><script type="application/json">
+{"questions":[
+ {"q":"(Day 1) Keadaan normal, bila <code>send()</code> Java dah return, record tu sebenarnya ada kat mana?",
+  "choices":["Dalam log leader broker","Dalam semua replika ISR","Dalam batch di accumulator","Dalam socket sender thread"],"answer":2,
+  "why":"<code>send()</code> cuma append ke batch dalam RecordAccumulator, lepas tu return Future. Sender thread yang hantar kemudian."},
+ {"q":"<code>linger.ms=50</code>, <code>batch.size=16384</code>, record 1 KB, app hantar 100 record/s. Batch pertama keluar bila ada lebih kurang 5 KB je. Kenapa dia keluar?",
+  "choices":["Kerana linger.ms sudah tamat","Kerana batch.size sudah penuh","Kerana buffer.memory sudah habis","Kerana max.block.ms sudah tamat"],"answer":0,
+  "why":"100 record/s maksudnya satu record setiap 10 ms. Dalam 50 ms baru ada lebih kurang 5 KB, jauh lagi dari 16 KB. So <code>batchReady()</code> tanda batch tu <em>expired</em>."},
+ {"q":"Broker down, <code>buffer.memory</code> dah penuh. App Java panggil <code>send()</code>. Apa yang app thread rasa <em>dulu</em>?",
+  "choices":["send() terus return Future","Record dibuang secara senyap","send() terus baling TimeoutException","send() tunggu sehingga max.block.ms"],"answer":3,
+  "why":"<code>BufferPool.allocate()</code> tunggu memori dipulangkan, paling lama baki <code>max.block.ms</code>. Thread app korang stuck kat situ dulu."},
+ {"q":"<code>max.block.ms</code> dah habis, memori still penuh. Macam mana app tahu record tu fail?",
+  "choices":["send() baling exception terus","Log broker sahaja mencatatnya","Melalui callback dan Future","Producer ditutup secara automatik"],"answer":2,
+  "why":"<code>BufferExhaustedException</code> → <code>TimeoutException</code> → <code>ApiException</code>, so dia ikut jalan B. <code>doSend()</code> bagi kat callback dan return <code>FutureFailure</code>. Kalau panggil <code>future.get()</code>, keluar <code>ExecutionException</code>."},
+ {"q":"Yang mana satu <strong>dicampak terus</strong> dari <code>send()</code> (jalan A), bukan ikut Future?",
+  "choices":["RecordTooLargeException untuk record besar","SerializationException dari serializer rosak","BufferExhaustedException selepas max.block.ms tamat","TimeoutException semasa tunggu metadata"],"answer":1,
+  "why":"<code>SerializationException</code> ni <code>KafkaException</code> biasa, bukan <code>ApiException</code>, so dia di-throw semula. 3 yang lain semua <code>ApiException</code>, so masuk callback."},
+ {"q":"Producer Python kat edge korang, queue local dah penuh. Apa <code>produce()</code> buat?",
+  "choices":["produce() raise BufferError serta-merta","produce() block sehingga max.block.ms","produce() buang mesej lama","produce() tunggu link pulih"],"answer":0,
+  "why":"librdkafka takde <code>max.block.ms</code>. <code>produce()</code> terus raise <code>BufferError</code>, dan app korang sendiri yang decide nak tunggu (<code>poll()</code>) atau buang."},
+ {"q":"Edge: 2,000 mesej/s, 1 KB setiap satu, broker tak dapat dicapai. Dua-dua had queue pakai default. Berapa saat sampai kena <code>BufferError</code> pertama?",
+  "type":"number","answer":50,"tol":1,"unit":"saat",
+  "why":"Had bilangan: 100000 ÷ 2000 = <strong>50 s</strong>. Had saiz: 1048576 KB ÷ 1 KB ≈ 1,048,576 mesej, lebih kurang 524 s. Had mana yang sampai dulu, dia yang menang."},
+ {"q":"Outage lagi lama dari <code>delivery.timeout.ms</code> korang (120 s), dan <code>producer.py</code> terus retry. Apa jadi kat data?",
+  "choices":["Semua mesej disimpan sehingga pulih","Producer berhenti dan app crash","Mesej tertua luput lalu hilang","Broker simpan mesej untuk edge"],"answer":2,
+  "why":"Jam <code>delivery.timeout.ms</code> start sejak <code>produce()</code>. Mesej yang expired dilaporkan fail kat <code>on_delivery</code>, tempat dia dikosongkan, dan loop retry korang pun berjaya masukkan mesej baru. So masa outage panjang, edge korang hilang data mula dari yang paling lama, kecuali app simpan kat tempat lain. Ni input terus untuk RPO dalam design doc Week 4."}
+]}
+</script></div>
+
+<h2>5. Lab 10 minit <span class="desktop">💻 desktop only</span></h2>
+<p><em>Guna lab 3-broker, BUKAN node edge production.</em></p>
+<p>Ni preview weekend lab #3. Tulis dulu ramalan korang untuk 2 nombor: saat ke berapa <code>BufferError</code> start, dan saat ke berapa delivery mula fail. Lepas tu run:</p>
+<pre><code>cd ~/workspaces/kafka-in-depth  # folder ni
+python clients/producer.py -t orders -n 0 -r 2000 -s 1000 -q \
+  -X queue.buffering.max.messages=20000 -X delivery.timeout.ms=30000
+# kat terminal lain, lepas ~5 s:
+podman stop kafka-1 kafka-2 kafka-3
+# lepas ~45 s, Ctrl-C producer, baca summary, lepas tu:
+podman start kafka-1 kafka-2 kafka-3</code></pre>
+<details class="answer"><summary>Check ramalan</summary>
+<p>Queue penuh lebih kurang <strong>10 s</strong> lepas broker stop (20000 ÷ 2000). Lepas tu <code>producer.py</code> berpusing dalam loop <code>poll(0.1)</code> diam² tanpa print apa². Kalau nak nampak, tambah <code>print</code> sekejap dalam blok <code>except BufferError</code>. Delivery mula fail lebih kurang <strong>30 s</strong> lepas mesej pertama yang tak terhantar dibuat, dan summary lepas Ctrl-C patut tunjuk failed count yang bukan kosong. Kalau nombor korang lari jauh, bawak output tu sini, kita bedah sama².</p>
+</details>
+
+<div class="box">
+  <strong>Bacaan utama (15 minit):</strong> <a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java#L974-L1075"><code>KafkaProducer.doSend()</code> dalam Kafka 4.1</a>. Lebih kurang 100 baris je, dan inilah yang tentukan semua baris dalam table atas: tunggu metadata, serialize, partition, append, dan <em>catch</em> mana yang throw balik vs mana yang bagi kat callback.
+  <br>Cheat sheet: <a href="../reference/producer-batching.html">Producer batching: Java vs librdkafka</a>.
+</div>
+
+<p class="ask">Ada yang blur? Tanya je terus dalam chat. Contohnya "kenapa tunggu metadata pun kira dalam <code>max.block.ms</code>?" atau "camne nak sizing queue edge untuk outage 1 jam?" Aku cikgu korang untuk topik ni.</p>
+
+<nav class="nav"><span><a href="../index.html">⌂ Semua lesson</a></span><span>← <a href="../videos/kafka-producer-send-path/renders/video.mp4">Day 1: Send path (video)</a></span><span>Next: Day 3 · Durability (acks, ISR)</span></nav>
+</main>
+<script defer src="../assets/quiz.js"></script>
+</body>
+</html>

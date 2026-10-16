@@ -1,0 +1,13 @@
+# Whitelist: only the published lesson site goes to GitHub. Labs, notes, configs stay local.
+/*
+!/.gitignore
+!/.nojekyll
+!/index.html
+!/lessons/
+!/reference/
+!/assets/
+!/videos/
+/videos/*/*
+!/videos/*/renders/
+/videos/*/renders/*
+!/videos/*/renders/video.mp4

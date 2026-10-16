@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rujukan · Producer batching: Java vs librdkafka</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<header class="lesson">
+  <div class="kicker">Rujukan · Producer</div>
+  <h1>Producer batching: Java vs librdkafka</h1>
+  <p class="lede">Bila batch keluar, apa yang block, apa yang throw. Disemak pada Kafka 4.1 dan librdkafka master.</p>
+</header>
+
+<h3>Batch dikira ready bila (Java)</h3>
+<ol>
+  <li><strong>full</strong>: record seterusnya tak muat dalam <code>batch.size</code></li>
+  <li><strong>expired</strong>: dah menunggu ≥ <code>linger.ms</code></li>
+  <li><strong>exhausted</strong>: ada <code>send()</code> sedang menunggu memori</li>
+  <li><em>atau</em> <code>flush()</code> / <code>close()</code></li>
+</ol>
+<p><cite class="src"><a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/clients/producer/internals/RecordAccumulator.java#L603-L615">RecordAccumulator.batchReady()</a></cite></p>
+
+<h3>Config dan default</h3>
+<table>
+  <tr><th>Java</th><th>Default (4.x)</th><th>librdkafka</th><th>Default</th></tr>
+  <tr><td><code>batch.size</code></td><td>16384 B</td><td><code>batch.size</code> / <code>batch.num.messages</code></td><td>1000000 B / 10000</td></tr>
+  <tr><td><code>linger.ms</code></td><td>5 ms</td><td><code>linger.ms</code> (= <code>queue.buffering.max.ms</code>)</td><td>5 ms</td></tr>
+  <tr><td><code>compression.type</code></td><td>none</td><td><code>compression.type</code></td><td>none</td></tr>
+  <tr><td><code>buffer.memory</code></td><td>32 MB</td><td><code>queue.buffering.max.messages</code> / <code>.kbytes</code></td><td>100000 / 1048576 KB</td></tr>
+  <tr><td><code>max.block.ms</code></td><td>60000 ms</td><td>tiada: <code>produce()</code> tak pernah block</td><td>n/a</td></tr>
+  <tr><td><code>delivery.timeout.ms</code></td><td>120000 ms</td><td><code>delivery.timeout.ms</code> (= <code>message.timeout.ms</code>)</td><td>300000 ms</td></tr>
+</table>
+<p><cite class="src"><a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/clients/producer/ProducerConfig.java#L381-L397">ProducerConfig</a> · <a href="https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md">librdkafka CONFIGURATION.md</a></cite></p>
+
+<h3>Block, throw, atau callback (Java <code>send()</code>)</h3>
+<table>
+  <tr><th>Keadaan</th><th>Hasil</th></tr>
+  <tr><td>Tunggu metadata, tunggu memori</td><td><strong>block</strong> dalam <code>send()</code>, kedua-duanya berkongsi satu bajet <code>max.block.ms</code></td></tr>
+  <tr><td>Bajet habis (<code>TimeoutException</code>, <code>BufferExhaustedException</code>)</td><td>callback + Future gagal</td></tr>
+  <tr><td>Record terlalu besar (<code>RecordTooLargeException</code>)</td><td>callback + Future gagal, serta-merta</td></tr>
+  <tr><td>Serializer gagal, interrupt, producer closed/fatal</td><td><strong>throw</strong> dari <code>send()</code></td></tr>
+</table>
+<p>Peraturan ringkas: <code>ApiException</code> → callback; <code>KafkaException</code> lain → throw. <cite class="src"><a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java#L1049-L1073">KafkaProducer.doSend()</a></cite></p>
+
+<h3>librdkafka (Python <code>produce()</code>)</h3>
+<table>
+  <tr><th>Keadaan</th><th>Hasil</th></tr>
+  <tr><td>Queue tempatan penuh</td><td><strong>raise <code>BufferError</code></strong> serta-merta; app yang memutuskan: <code>poll()</code> dan cuba lagi, atau buang</td></tr>
+  <tr><td>Mesej melebihi <code>delivery.timeout.ms</code></td><td>error dalam <code>on_delivery</code>; ruang dalam queue dibebaskan</td></tr>
+  <tr><td>Ralat lain</td><td>raise <code>KafkaException</code></td></tr>
+</table>
+<p><cite class="src"><a href="https://docs.confluent.io/platform/current/clients/confluent-kafka-python/html/index.html#confluent_kafka.Producer.produce">confluent-kafka-python Producer.produce</a></cite></p>
+
+<h3>Kira-kira pantas untuk edge</h3>
+<p><strong>Masa sehingga queue penuh</strong> = min(<code>max.messages</code> ÷ kadar, <code>max.kbytes</code> ÷ (kadar × saiz mesej KB)).<br>
+Dalam outage yang lebih panjang daripada <code>delivery.timeout.ms</code>, mesej tertua luput dan hilang terlebih dahulu.</p>
+
+<nav class="nav"><span><a href="../index.html">⌂ Semua lesson</a></span><span>Diajar dalam: <a href="../lessons/0001-batching-block-atau-throw.html">0001 · Batching: block atau throw?</a></span></nav>
+</main>
+</body>
+</html>
