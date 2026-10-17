@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0002 · acks &amp; ISR: bila "acked" betul² selamat?</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<header class="lesson">
+  <div class="kicker">Week 1 · Day 3 · Durability</div>
+  <h1><code>acks</code> &amp; ISR: bila "acked" betul² selamat?</h1>
+  <p class="lede">Callback ko kata OK. Tapi OK tu maksudnya berapa broker dah simpan record ko? Dan kenapa <code>acks=all</code> kat edge ko sebenarnya sama je dengan <code>acks=1</code>?</p>
+</header>
+
+<div class="note">
+  <strong>Teka dulu (30 saat):</strong> topic RF=3, producer <code>acks=all</code>. Dua broker mati, tinggal leader sorang. Produce masih jalan ke tak? Tulis jawapan dulu, baru scroll.
+</div>
+
+<h2>1. <code>acks</code>: siapa kena ada record sebelum dapat OK</h2>
+<p>Dari <a href="0001-batching-block-atau-throw.html">lesson 0001</a>: <code>send()</code> bagi Future, dan Future tu "done" bila broker balas. <code>acks</code> tentukan <strong>bila</strong> leader broker balas:</p>
+<table>
+  <tr><th><code>acks</code></th><th>Leader balas bila…</th><th>Boleh hilang bila…</th></tr>
+  <tr><td><code>0</code></td><td>tak balas langsung. Producer anggap OK sebaik je dia hantar.</td><td>apa² jadi pun. Offset pun ko tak tahu.</td></tr>
+  <tr><td><code>1</code></td><td>leader dah tulis dalam log dia sendiri</td><td>leader mati sebelum follower sempat copy</td></tr>
+  <tr><td><code>all</code> (= <code>-1</code>)</td><td><strong>semua replika dalam ISR sekarang</strong> dah ada record tu</td><td>ISR mengecut sampai tinggal leader sorang (section 3)</td></tr>
+</table>
+<p><strong>Default:</strong> Java <code>acks=all</code> (sejak Kafka 3.0), librdkafka <code>acks=-1</code> (= all). Dua-dua sama. Config lab dan edge ko pun set <code>acks=all</code>.
+<cite class="src">(<a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/clients/producer/ProducerConfig.java#L383-L385">ProducerConfig</a> · <a href="https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md">librdkafka CONFIGURATION.md</a>)</cite></p>
+
+<h2>2. ISR: siapa yang dikira "in sync"</h2>
+<p><strong>ISR</strong> (in-sync replicas) ialah senarai replika yang tengah kejar leader dengan elok. Follower kena buang dari ISR kalau dia tak fetch dari leader, atau tak sampai hujung log leader, dalam masa <code>replica.lag.time.max.ms</code> (default <strong>30 s</strong>).
+<cite class="src">(<a href="https://github.com/apache/kafka/blob/4.1/server/src/main/java/org/apache/kafka/server/config/ReplicationConfigs.java#L47-L49">ReplicationConfigs</a>)</cite></p>
+
+<figure>
+<svg viewBox="0 0 640 200" role="img" aria-label="Tiga broker. Sebelum: ISR ada leader, follower 1 dan follower 2. Selepas follower 2 mati lebih 30 saat: ISR tinggal leader dan follower 1." font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" fill="none" stroke="currentColor">
+  <text x="10" y="22" fill="currentColor" stroke="none" font-weight="600">Normal</text>
+  <rect x="10" y="34" width="290" height="70" rx="8" stroke-dasharray="4 3"/><text x="18" y="50" fill="currentColor" stroke="none" font-size="11">ISR</text>
+  <rect x="24" y="56" width="80" height="38" rx="5"/><text x="64" y="80" text-anchor="middle" fill="currentColor" stroke="none">leader</text>
+  <rect x="114" y="56" width="80" height="38" rx="5"/><text x="154" y="80" text-anchor="middle" fill="currentColor" stroke="none">follower 1</text>
+  <rect x="204" y="56" width="80" height="38" rx="5"/><text x="244" y="80" text-anchor="middle" fill="currentColor" stroke="none">follower 2</text>
+  <text x="10" y="130" fill="currentColor" stroke="none" font-size="12">acks=all → tunggu 3 replika</text>
+  <text x="340" y="22" fill="currentColor" stroke="none" font-weight="600">Follower 2 senyap &gt; 30 s</text>
+  <rect x="340" y="34" width="200" height="70" rx="8" stroke-dasharray="4 3"/><text x="348" y="50" fill="currentColor" stroke="none" font-size="11">ISR</text>
+  <rect x="354" y="56" width="80" height="38" rx="5"/><text x="394" y="80" text-anchor="middle" fill="currentColor" stroke="none">leader</text>
+  <rect x="444" y="56" width="80" height="38" rx="5"/><text x="484" y="80" text-anchor="middle" fill="currentColor" stroke="none">follower 1</text>
+  <rect x="550" y="56" width="80" height="38" rx="5" opacity=".4"/><text x="590" y="80" text-anchor="middle" fill="currentColor" stroke="none" opacity=".5">follower 2</text>
+  <text x="340" y="130" fill="currentColor" stroke="none" font-size="12">acks=all → tunggu 2 replika je</text>
+  <text x="10" y="176" fill="currentColor" stroke="none" font-size="12">"all" = semua dalam ISR <tspan font-weight="600">sekarang</tspan>, bukan semua replika. ISR mengecut → "all" pun mengecut.</text>
+</svg>
+</figure>
+
+<p>Ni part paling penting dalam lesson ni: <code>acks=all</code> maksudnya <em>semua dalam ISR</em>, bukan <em>semua replika</em>. Kalau ISR mengecut sampai tinggal leader sorang, <code>acks=all</code> diam² jadi sama dengan <code>acks=1</code>.</p>
+
+<h2>3. <code>min.insync.replicas</code>: lantai keselamatan</h2>
+<p>Nak halang benda tu jadi, set <code>min.insync.replicas</code>. Setting ni diletak kat broker atau topic, bukan kat producer. Kalau <code>acks=all</code> dan saiz ISR &lt; <code>min.insync.replicas</code>, broker <strong>tolak</strong> write tu dengan <code>NotEnoughReplicas</code> (atau <code>NotEnoughReplicasAfterAppend</code>).
+<cite class="src">(<a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/common/config/TopicConfig.java#L172-L180">TopicConfig: MIN_IN_SYNC_REPLICAS_DOC</a>)</cite></p>
+<ul>
+  <li><strong>Default dia 1</strong> 😬 <cite class="src">(<a href="https://github.com/apache/kafka/blob/4.1/server-common/src/main/java/org/apache/kafka/server/config/ServerLogConfigs.java#L139">ServerLogConfigs</a>)</cite>. Dengan default ni, takde lantai langsung.</li>
+  <li>Setting ni <strong>hanya diperiksa untuk <code>acks=all</code></strong>. <code>acks=1</code> dan <code>acks=0</code> tak peduli langsung.</li>
+  <li>Error <code>NotEnoughReplicas</code> tu retriable. Producer akan retry sampai <code>delivery.timeout.ms</code> habis (Day 4), dan lepas tu error sampai ikut <strong>jalan B</strong> (callback / <code>on_delivery</code>), bukan throw. Ingat lesson 0001?</li>
+</ul>
+<p><strong>Lab ko</strong> (<code>docker-compose.yml</code>): RF=3, <code>min.insync.replicas=2</code>. Maksudnya ko boleh hilang <strong>1</strong> broker dan produce masih jalan. Hilang <strong>2</strong>, produce stall dan akhirnya fail.</p>
+
+<h2>4. Soalan roadmap: kenapa <code>acks=all</code> + RF=1 = <code>acks=1</code>?</h2>
+<p>RF=1 maksudnya cuma ada satu replika, iaitu leader. So ISR = {leader}, dan "semua dalam ISR" = leader sorang. Itulah definisi <code>acks=1</code>.</p>
+<div class="note">
+  <strong>Ni terus kena kat edge ko.</strong> <code>edge-cluster/compose.yml</code> set <strong>RF=1, <code>min.insync.replicas=1</code></strong>. Tapi comment dalam <code>clients/config/edge-producer.properties</code> tulis <em>"all = every in-sync replica (min.insync.replicas=2)"</em>. Comment tu salah untuk edge. Kat edge, <code>acks=all</code> tak bagi perlindungan lebih dari <code>acks=1</code>.
+  <br><br>
+  Satu lagi plot twist: Kafka <strong>tak fsync</strong> setiap mesej by default. <code>flush.messages</code> default dia <code>Long.MAX_VALUE</code>, dan docs Kafka sendiri cadangkan guna <em>replication</em> untuk durability, bukan fsync. <cite class="src">(<a href="https://github.com/apache/kafka/blob/4.1/server-common/src/main/java/org/apache/kafka/server/config/ServerLogConfigs.java#L84-L85">ServerLogConfigs</a> · <a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/common/config/TopicConfig.java#L51-L55">FLUSH_MESSAGES_INTERVAL_DOC</a>)</cite> So kat edge RF=1, record yang dah di-ack mungkin masih dalam <em>page cache</em> je. Kalau power terputus sebelum OS sempat flush, record yang dah "acked" tu boleh hilang. Simpan dulu soalan ni untuk Week 4 (pilihan HA untuk edge).
+</div>
+
+<h3>Java vs librdkafka (lab ko)</h3>
+<table>
+  <tr><th>Setting</th><th>Java default</th><th>librdkafka default</th><th>Config lab/edge ko</th></tr>
+  <tr><td><code>acks</code></td><td><code>all</code></td><td><code>-1</code> (= all)</td><td><code>all</code></td></tr>
+  <tr><td><code>enable.idempotence</code></td><td><code>true</code></td><td><strong><code>false</code></strong></td><td><code>true</code> (set sendiri, bagus)</td></tr>
+  <tr><td><code>min.insync.replicas</code></td><td colspan="2">setting broker/topic (default 1), sama untuk dua-dua client</td><td>lab 2 · edge 1</td></tr>
+</table>
+<p><cite class="src">librdkafka default <code>enable.idempotence=false</code>: <a href="https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md">CONFIGURATION.md</a>. Idempotence kita bedah dalam Day 5.</cite></p>
+
+<h2>5. Latihan</h2>
+<p>Jawab ikut ingatan. Soalan 1 ulang kaji lesson 0001 😉</p>
+<div class="quiz"><script type="application/json">
+{"questions":[
+ {"q":"(Ulang kaji 0001) App Python ko produce laju, broker down, queue local penuh. Apa yang sebenarnya \"menunggu\"?",
+  "choices":["Loop poll() dalam code ko","produce() tunggu sampai max.block.ms dulu","Sender thread dalam client librdkafka","Broker tahan request buat sementara"],"answer":0,
+  "why":"librdkafka takde <code>max.block.ms</code>. <code>produce()</code> terus raise <code>BufferError</code>, dan yang menunggu tu loop <code>except BufferError: poll(0.1)</code> dalam code ko sendiri."},
+ {"q":"<code>acks=1</code>. Leader tulis record, hantar ack, lepas tu terus mati sebelum follower sempat copy. Apa jadi kat record tu?",
+  "choices":["Record selamat dalam follower lain","Producer dapat error lalu retry","Record hilang walaupun sudah acked","Broker baru minta producer hantar"],"answer":2,
+  "why":"Dengan <code>acks=1</code>, ack keluar sebaik je leader tulis. Follower yang naik jadi leader baru takde record tu. Producer dah dapat OK, so dia takkan retry. Record tu hilang senyap."},
+ {"q":"RF=3, <code>min.insync.replicas=2</code>, ISR = {1, 2, 3}. Bila write <code>acks=all</code> dikira berjaya?",
+  "choices":["Bila dua replika sudah ada","Bila ketiga-tiga replika ISR ada","Bila leader sahaja sudah tulis","Bila majoriti broker cluster setuju"],"answer":1,
+  "why":"<code>acks=all</code> tunggu <em>semua</em> ahli ISR sekarang, walaupun <code>min.insync.replicas</code> lagi kecil. <code>min.insync.replicas</code> cuma lantai bila ISR mengecut. (Docs TopicConfig bagi contoh yang sama.)"},
+ {"q":"RF=3, <code>min.insync.replicas=2</code>, dua broker mati, ISR = {leader}. Producer <code>acks=all</code> hantar record. Apa jadi?",
+  "choices":["Berjaya sebab leader masih hidup","Berjaya tetapi tanpa sebarang replika","Producer tukar acks=1 secara automatik","Ditolak dengan NotEnoughReplicas, producer retry"],"answer":3,
+  "why":"Saiz ISR (1) &lt; <code>min.insync.replicas</code> (2), so broker tolak. Error ni retriable, so producer retry sampai <code>delivery.timeout.ms</code> habis, lepas tu callback dapat error (jalan B)."},
+ {"q":"Keadaan sama (ISR = {leader}, <code>min.insync.replicas=2</code>), tapi producer guna <code>acks=1</code>. Apa jadi?",
+  "choices":["Berjaya sebab min.insync tak diperiksa","Ditolak sebab ISR kurang dua","Producer block sampai max.block.ms habis","Leader tunggu follower kembali dulu"],"answer":0,
+  "why":"<code>min.insync.replicas</code> hanya dikuatkuasa untuk <code>acks=all</code>. Dengan <code>acks=1</code>, write berjaya walaupun cuma leader sorang yang ada record tu. Risikonya sama macam soalan 2."},
+ {"q":"Kenapa <code>acks=all</code> pada topic RF=1 sama je dengan <code>acks=1</code>?",
+  "choices":["Broker abaikan acks bila RF=1","Follower ack secara automatik semuanya","ISR cuma ada leader seorang","min.insync=1 mematikan semua semakan replika"],"answer":2,
+  "why":"RF=1 → satu replika je → ISR = {leader}. \"Tunggu semua dalam ISR\" = tunggu leader sorang, dan itulah definisi <code>acks=1</code>."},
+ {"q":"Edge ko (RF=1), producer <code>acks=all</code>, callback dapat OK. Satu saat lepas tu power terputus. Record tu selamat?",
+  "choices":["Selamat sebab acks=all sudah tunggu disk","Mungkin hilang sebab belum fsync disk","Selamat sebab ada replika di CC","Hilang sebab producer belum terima ack"],"answer":1,
+  "why":"Ack datang lepas leader tulis ke log, tapi Kafka tak fsync setiap mesej by default (<code>flush.messages</code> = <code>Long.MAX_VALUE</code>). Record tu mungkin masih dalam page cache je. Takde replika lain untuk selamatkan dia, dan Cluster Linking ke CC berjalan async."},
+ {"q":"Follower berhenti fetch pada t=0. Dengan default <code>replica.lag.time.max.ms</code>, lebih kurang berapa saat sebelum leader buang dia dari ISR?",
+  "type":"number","answer":30,"tol":2,"unit":"saat",
+  "why":"<code>replica.lag.time.max.ms</code> default 30000 ms = <strong>30 s</strong>. Sepanjang masa tu, write <code>acks=all</code> masih tunggu follower yang dah mati, so latency melonjak sampai ISR mengecut. Ni yang ko akan nampak sebagai \"latency spike\" dalam weekend lab."}
+]}
+</script></div>
+
+<h2>6. Lab preview <span class="desktop">💻 desktop only</span></h2>
+<p><em>Guna lab 3-broker, BUKAN node edge production.</em> Ni sebahagian weekend lab #1. Sebelum run, tulis dulu ramalan ko untuk setiap langkah:</p>
+<pre><code>cd ~/workspaces/kafka-in-depth
+kafka-topics --describe --topic orders          # tengok kolum Isr
+python clients/producer.py -t orders -n 0 -r 5 &amp;
+podman stop kafka-2                             # ramal: masih deliver?
+kafka-topics --describe --topic orders          # ISR tinggal berapa?
+podman stop kafka-3                             # ramal: apa jadi?
+# tunggu ~2 minit, tengok output producer
+podman start kafka-2 kafka-3</code></pre>
+<details class="answer"><summary>Check ramalan</summary>
+<p>Lepas stop <strong>kafka-2</strong>: ISR jadi 2 replika (≥ <code>min.insync.replicas=2</code>), so produce masih jalan. Lepas stop <strong>kafka-3</strong>: ISR tinggal 1 &lt; 2, broker tolak dengan <code>NotEnoughReplicas</code>. Delivery stall sbb producer retry, kemudian fail lepas <code>delivery.timeout.ms</code> (120 s dalam config ko) melalui <code>on_delivery</code>. Kalau ko tukar ke <code>-X acks=1</code>, langkah kedua tu terus "berjaya" walaupun tinggal satu replika. Bahaya kan? 😬</p>
+</details>
+
+<div class="box">
+  <strong>Bacaan utama (10 minit):</strong> <a href="https://kafka.apache.org/documentation/#replication">Apache Kafka docs: Replication</a>. Baca bahagian ISR, "committed", dan trade-off <code>min.insync.replicas</code>. Ni sumber asal untuk semua yang ada dalam lesson ni.
+  <br>Cheat sheet: <a href="../reference/acks-isr.html">acks, ISR &amp; min.insync.replicas</a>.
+</div>
+
+<p class="ask">Ada yang blur? Tanya je dalam chat. Contohnya "kenapa Kafka tak fsync by default?" atau "kalau edge RF=1, apa pilihan untuk tak hilang data masa power cut?" Aku cikgu ko untuk topik ni.</p>
+
+<nav class="nav"><span><a href="../index.html">⌂ Semua lesson</a></span><span>← <a href="0001-batching-block-atau-throw.html">0001 · Batching</a></span><span>Next: Day 4 · Retries &amp; timeouts</span></nav>
+</main>
+<script defer src="../assets/quiz.js"></script>
+</body>
+</html>

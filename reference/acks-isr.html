@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rujukan · acks, ISR &amp; min.insync.replicas</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<header class="lesson">
+  <div class="kicker">Rujukan · Durability</div>
+  <h1>acks, ISR &amp; min.insync.replicas</h1>
+  <p class="lede">Bila produce dikira "berjaya", dan bila "berjaya" tu boleh hilang. Disemak pada Kafka 4.1 dan librdkafka master.</p>
+</header>
+
+<h3>acks</h3>
+<table>
+  <tr><th>acks</th><th>Ack bila</th><th>Hilang bila</th></tr>
+  <tr><td>0</td><td>tak tunggu langsung</td><td>bila-bila masa; offset tak diketahui</td></tr>
+  <tr><td>1</td><td>leader tulis log</td><td>leader mati sebelum follower copy</td></tr>
+  <tr><td>all / -1</td><td>semua ahli ISR <em>sekarang</em> ada record</td><td>ISR mengecut ke leader sahaja, dan min.insync=1</td></tr>
+</table>
+
+<h3>Default</h3>
+<table>
+  <tr><th>Setting</th><th>Java 4.x</th><th>librdkafka</th><th>Diset di</th></tr>
+  <tr><td><code>acks</code></td><td>all</td><td>-1 (all)</td><td>producer</td></tr>
+  <tr><td><code>enable.idempotence</code></td><td>true</td><td><strong>false</strong></td><td>producer</td></tr>
+  <tr><td><code>min.insync.replicas</code></td><td colspan="2">1</td><td>broker / topic</td></tr>
+  <tr><td><code>replica.lag.time.max.ms</code></td><td colspan="2">30000</td><td>broker</td></tr>
+  <tr><td><code>flush.messages</code> (fsync)</td><td colspan="2">Long.MAX_VALUE (tiada fsync paksa)</td><td>broker / topic</td></tr>
+</table>
+<p><cite class="src"><a href="https://github.com/apache/kafka/blob/4.1/clients/src/main/java/org/apache/kafka/clients/producer/ProducerConfig.java#L383-L385">ProducerConfig</a> · <a href="https://github.com/apache/kafka/blob/4.1/server-common/src/main/java/org/apache/kafka/server/config/ServerLogConfigs.java#L139">ServerLogConfigs</a> · <a href="https://github.com/apache/kafka/blob/4.1/server/src/main/java/org/apache/kafka/server/config/ReplicationConfigs.java#L47">ReplicationConfigs</a> · <a href="https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md">librdkafka</a></cite></p>
+
+<h3>Peraturan</h3>
+<ul>
+  <li><strong>"all" = semua dalam ISR sekarang</strong>, bukan semua replika.</li>
+  <li>Follower keluar ISR kalau tak sampai hujung log leader dalam <code>replica.lag.time.max.ms</code>.</li>
+  <li><code>acks=all</code> + ISR &lt; <code>min.insync.replicas</code> → <code>NotEnoughReplicas</code> (retriable) → retry sampai <code>delivery.timeout.ms</code> → error ke callback (jalan B).</li>
+  <li><code>min.insync.replicas</code> <strong>tidak</strong> diperiksa untuk <code>acks=0/1</code>.</li>
+  <li>RF=1 → ISR = {leader} → <code>acks=all</code> ≡ <code>acks=1</code>.</li>
+  <li>Kafka bergantung pada replication untuk durability, bukan fsync. Pada RF=1, record yang dah di-ack mungkin masih dalam page cache.</li>
+</ul>
+
+<h3>Formula pantas</h3>
+<p>Broker boleh hilang tanpa produce terhenti (acks=all) = <strong>RF − min.insync.replicas</strong>.<br>
+Lab: 3 − 2 = 1 · Edge: 1 − 1 = 0 (dan tiada salinan kedua).</p>
+
+<nav class="nav"><span><a href="../index.html">⌂ Semua lesson</a></span><span>Diajar dalam: <a href="../lessons/0002-acks-isr-bila-selamat.html">0002 · acks &amp; ISR</a></span></nav>
+</main>
+</body>
+</html>
