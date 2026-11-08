@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0003 · Retries &amp; timeouts: bila send betul² fail?</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<header class="lesson">
+  <div class="kicker">Week 1 · Day 4 · Retries &amp; timeouts</div>
+  <h1>Retries &amp; timeouts: bila send betul² fail?</h1>
+  <p class="lede">Ada empat setting: <code>retries</code>, <code>retry.backoff.ms</code>, <code>request.timeout.ms</code>, <code>delivery.timeout.ms</code>. Tapi cuma satu je yang betul² cakap "dah, fail". Yang mana satu?</p>
+</header>
+
+<div class="note">
+  <strong>Teka dulu (30 saat):</strong> <code>retries=0</code>. Broker kena restart 5 saat, lepas tu hidup balik. Record yang dihantar masa tu hilang ke tak? Tulis jawapan dulu, baru scroll.
+</div>
+
+<h2>1. Empat setting, empat tugas</h2>
+<p>Dari <a href="0002-acks-isr-bila-selamat.html">lesson 0002</a>: <code>NotEnoughReplicas</code> tu retriable, dan producer retry sampai <code>delivery.timeout.ms</code> habis. Sekarang kita bedah mekanisme tu:</p>
+<table>
+  <tr><th>Setting</th><th>Default</th><th>Tugas dia</th></tr>
+  <tr><td><code>request.timeout.ms</code></td><td>30 s</td><td>tunggu <strong>satu</strong> response je. Habis masa → request tu dianggap gagal.</td></tr>
+  <tr><td><code>retry.backoff.ms</code> / <code>retry.backoff.max.ms</code></td><td>100 ms / 1 s</td><td>berapa lama rehat sebelum cuba lagi. Naik eksponen sampai max.</td></tr>
+  <tr><td><code>retries</code></td><td>2147483647</td><td>had bilangan cubaan semula</td></tr>
+  <tr><td><code>delivery.timeout.ms</code></td><td>120 s (Java) · 300 s (librdkafka)</td><td>jam <strong>total</strong> satu record, dari <code>send()</code> sampai ack atau error</td></tr>
+</table>
+<p>Default <code>retries</code> tu hampir tak terhingga. Maksudnya dia hampir tak pernah jadi penentu. Kafka docs sendiri cadangkan: biar <code>retries</code> macam tu, dan kawal guna <code>delivery.timeout.ms</code> je.
+<cite class="src">(<a href="https://kafka.apache.org/documentation/#producerconfigs">Kafka producer configs</a> · <a href="https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md">librdkafka CONFIGURATION.md</a>)</cite></p>
+
+<h2>2. Satu record, satu jam</h2>
+<p>Jam <code>delivery.timeout.ms</code> start bila record masuk <code>send()</code> dan jalan terus walaupun ada retry, backoff, atau tunggu response. Tengok apa jadi bila broker "senyap" (TCP sambung tapi tak balas):</p>
+
+<figure>
+<svg viewBox="0 0 640 190" role="img" aria-label="Garis masa 120 saat. Cubaan 1 dari 0 ke 30 saat timeout, backoff kecil, cubaan 2 dari 30 ke 60, cubaan 3 dari 60 ke 90, cubaan 4 bermula pada 90 dan dipotong pada 120 saat apabila delivery.timeout.ms tamat." font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="none" stroke="currentColor">
+  <text x="10" y="18" fill="currentColor" stroke="none" font-weight="600">Broker senyap · request.timeout.ms=30 s · delivery.timeout.ms=120 s</text>
+  <line x1="20" y1="120" x2="620" y2="120"/>
+  <rect x="20" y="52" width="150" height="40" rx="5"/><text x="95" y="76" text-anchor="middle" fill="currentColor" stroke="none">cubaan 1 · tunggu 30 s</text>
+  <rect x="173" y="52" width="147" height="40" rx="5"/><text x="246" y="76" text-anchor="middle" fill="currentColor" stroke="none">cubaan 2</text>
+  <rect x="323" y="52" width="147" height="40" rx="5"/><text x="396" y="76" text-anchor="middle" fill="currentColor" stroke="none">cubaan 3</text>
+  <rect x="473" y="52" width="147" height="40" rx="5" stroke-dasharray="4 3"/><text x="546" y="76" text-anchor="middle" fill="currentColor" stroke="none">cubaan 4 (dipotong)</text>
+  <text x="20" y="138" fill="currentColor" stroke="none">0</text><text x="170" y="138" fill="currentColor" stroke="none">30 s</text><text x="320" y="138" fill="currentColor" stroke="none">60 s</text><text x="470" y="138" fill="currentColor" stroke="none">90 s</text><text x="596" y="138" fill="currentColor" stroke="none">120 s</text>
+  <line x1="620" y1="40" x2="620" y2="120" stroke-width="2"/>
+  <text x="10" y="166" fill="currentColor" stroke="none">Jeda antara cubaan (backoff) cuma 100 ms. Pada 120 s, record fail → callback (jalan B).</text>
+</svg>
+</figure>
+
+<p>Kalau broker <em>menolak</em> sambungan terus (bukan senyap), setiap cubaan fail dalam milisaat, dan backoff yang naik dari 100 ms ke 1 s yang tentukan berapa banyak cubaan muat. Dalam dua-dua kes, <strong>yang potong akhirnya ialah <code>delivery.timeout.ms</code></strong>, bukan <code>retries</code>.</p>
+
+<h2>3. Kenapa <code>delivery.timeout.ms ≥ linger.ms + request.timeout.ms</code></h2>
+<p>Soalan roadmap. Record kena duduk dalam batch sampai <code>linger.ms</code> habis, lepas tu hantar, dan tunggu response sampai <code>request.timeout.ms</code>. Itu <strong>satu cubaan yang paling kurang</strong>. Kalau <code>delivery.timeout.ms</code> lagi kecil dari jumlah tu, record boleh expired <em>sebelum</em> broker sempat jawab, dan producer langsung tak dapat peluang betul². Java enforce ni: set lebih kecil, dia baling <code>ConfigException</code> masa ko construct producer. librdkafka tak buat check yang sama, so config bodoh senyap² dibenarkan.</p>
+<p>Default: 5 + 30000 = 30005 ms minimum. Default sebenar 120 s bagi ruang lebih kurang 4 cubaan penuh.</p>
+
+<h2>4. Retriable vs tak retriable</h2>
+<ul>
+  <li><strong>Retriable</strong> (producer cuba lagi): <code>NotEnoughReplicas</code>, <code>NotLeaderOrFollower</code> (leader pindah), network error, request timeout.</li>
+  <li><strong>Tak retriable</strong> (fail terus, tak tunggu jam): <code>MessageTooLarge</code>, authorization error. Retry seribu kali pun jawapan sama.</li>
+</ul>
+<p>Sebab tu config salah macam topic tak wujud atau ACL salah selalu fail <em>cepat</em>, manakala broker down fail <em>lambat</em> (tunggu jam habis).</p>
+
+<h2>5. Request timeout: hasil yang tak pasti</h2>
+<div class="note">
+  <strong>Ni jebakan sebenar.</strong> Bila <code>request.timeout.ms</code> habis, producer <em>tak tahu</em> broker dah tulis record tu ke belum. Mungkin request tak sampai langsung. Mungkin broker dah tulis, cuma response tersangkut. Producer retry dalam dua-dua kes, jadi dalam kes kedua, <strong>record masuk dua kali</strong>.
+</div>
+<p>Inilah sebab retry tanpa idempotence boleh bagi duplicate dan, kalau ada beberapa request in flight, boleh <em>salah susun</em>. Day 5 kita bedah penyelesaiannya (producer ID + sequence number). Untuk sekarang, ingat: retry selamatkan record daripada <em>hilang</em>, tapi bukan percuma.</p>
+
+<h3>Edge ko</h3>
+<p><code>edge-producer.properties</code> set <code>delivery.timeout.ms=120000</code> (dari lesson 0001). Maksudnya outage broker atau link yang lebih lama dari <strong>2 minit</strong> mula buang record tertua dulu. Satu angka ni tentukan "berapa lama edge boleh tahan" untuk masalah pendek. Untuk outage WAN yang lagi lama, kita bincang buffering di Week 4.</p>
+
+<h2>6. Latihan</h2>
+<p>Jawab ikut ingatan. Soalan 1 ulang kaji lesson 0002 😉</p>
+<div class="quiz"><script type="application/json">
+{"questions":[
+ {"q":"(Ulang kaji 0002) Edge ko RF=1, <code>acks=all</code>. Kenapa dia tak lebih selamat dari <code>acks=1</code>?",
+  "choices":["ISR cuma ada leader seorang","Producer abaikan setting acks","Broker tak tulis ke log langsung","Cluster Linking tolak acks=all"],"answer":0,
+  "why":"RF=1 → ISR = {leader} → \"semua dalam ISR\" = leader sorang. Itu definisi <code>acks=1</code>."},
+ {"q":"Antara empat setting ni, yang mana <strong>betul² tentukan</strong> bila send fail (pada default)?",
+  "choices":["retries","retry.backoff.ms","request.timeout.ms","delivery.timeout.ms"],"answer":3,
+  "why":"<code>retries</code> default hampir tak terhingga, jadi jarang sampai had. <code>delivery.timeout.ms</code> ialah jam total satu record, dan bila habis, record fail."},
+ {"q":"<code>request.timeout.ms</code> habis pada satu request. Apa yang producer buat?",
+  "choices":["Terus fail record tu","Anggap request gagal, retry kalau jam delivery belum habis","Tukar acks ke 1","Buang batch senyap²"],"answer":1,
+  "why":"Request timeout cuma tamatkan <em>satu cubaan</em>. Kalau <code>delivery.timeout.ms</code> masih ada baki, producer cuba lagi lepas backoff."},
+ {"q":"Kenapa Java baling <code>ConfigException</code> kalau <code>delivery.timeout.ms &lt; linger.ms + request.timeout.ms</code>?",
+  "choices":["Sebab retries jadi negatif","Sebab broker tolak config tu","Sebab buffer.memory tak cukup","Sebab record boleh expired sebelum dapat satu cubaan penuh"],"answer":3,
+  "why":"Record kena tunggu <code>linger.ms</code> dalam batch, lepas tu tunggu response sampai <code>request.timeout.ms</code>. Kalau jam delivery lebih kecil, producer tak sempat bagi satu cubaan penuh."},
+ {"q":"<code>MessageTooLarge</code> dan <code>NotEnoughReplicas</code>. Mana satu producer akan retry?",
+  "choices":["Kedua-dua","Tiada satu pun","Cuma NotEnoughReplicas","Cuma MessageTooLarge"],"answer":2,
+  "why":"<code>NotEnoughReplicas</code> boleh pulih sendiri bila ISR naik semula, jadi retriable. <code>MessageTooLarge</code> akan sentiasa gagal, jadi fail terus."},
+ {"q":"Request timeout berlaku, producer retry, tapi sebenarnya broker dah tulis record pada cubaan pertama. Tanpa idempotence, apa jadi?",
+  "choices":["Broker buang yang kedua automatik","Record wujud dua kali dalam log","Producer dapat error duplicate","Consumer langkau salah satu"],"answer":1,
+  "why":"Tanpa producer ID + sequence number, broker tak boleh kenal record yang sama dihantar dua kali. Dua-dua ditulis. Idempotence (Day 5) selesaikan ni."},
+ {"q":"Broker senyap (TCP sambung tapi tak balas). <code>request.timeout.ms</code>=30 s, <code>delivery.timeout.ms</code>=120 s. Lebih kurang berapa saat sebelum record fail ke callback?",
+  "type":"number","answer":120,"tol":2,"unit":"saat",
+  "why":"Jam <code>delivery.timeout.ms</code> jalan dari <code>send()</code>. Cubaan 1–3 timeout pada 30/60/90 s, cubaan 4 dipotong pada <strong>120 s</strong>. <code>retries</code> tak sampai had pun."},
+ {"q":"<code>linger.ms=5</code>, <code>request.timeout.ms=30000</code>. Berapa ms minimum <code>delivery.timeout.ms</code> yang Java benarkan?",
+  "type":"number","answer":30005,"tol":0,"unit":"ms",
+  "why":"<code>linger.ms + request.timeout.ms</code> = 5 + 30000 = <strong>30005 ms</strong>. Kurang dari tu, <code>ConfigException</code>."}
+]}
+</script></div>
+
+<h2>7. Lab preview <span class="desktop">💻 desktop only</span></h2>
+<p><em>Guna lab 3-broker, BUKAN node edge production.</em> Tulis ramalan dulu: berapa lama sampai callback pertama dapat error?</p>
+<pre><code>cd ~/workspaces/kafka-in-depth
+python clients/producer.py -t orders -n 0 -r 5 \
+  -X delivery.timeout.ms=20000 -X request.timeout.ms=5000 &amp;
+podman stop kafka-1 kafka-2 kafka-3     # semua broker mati
+# catat masa sampai on_delivery lapor error
+podman start kafka-1 kafka-2 kafka-3</code></pre>
+<details class="answer"><summary>Check ramalan</summary>
+<p>Lebih kurang <strong>20 s</strong> selepas record dihantar, ikut <code>delivery.timeout.ms</code>, bukan <code>request.timeout.ms</code> (5 s) dan bukan <code>retries</code>. Kalau ko tukar <code>delivery.timeout.ms=60000</code> dan ulang, masa tu ikut jadi ~60 s. Kalau error datang lebih awal dari tu, check mesej: mungkin bukan retriable. Ni juga sebahagian weekend lab #3 (isi buffer).</p>
+</details>
+
+<div class="box">
+  <strong>Bacaan utama (10 minit):</strong> <a href="https://kafka.apache.org/documentation/#producerconfigs">Apache Kafka docs: Producer configs</a>. Baca description <code>delivery.timeout.ms</code>, <code>request.timeout.ms</code> dan <code>retries</code> betul² perkataan demi perkataan.
+  <br>Cheat sheet: <a href="../reference/retries-timeouts.html">Retries &amp; timeouts</a>.
+</div>
+
+<p class="ask">Ada yang blur? Tanya je dalam chat. Contohnya "kenapa retries default Integer.MAX_VALUE?" atau "macam mana nak pilih delivery.timeout.ms untuk edge ko?" Aku cikgu ko untuk topik ni.</p>
+
+<nav class="nav"><span><a href="../index.html">⌂ Semua lesson</a></span><span>← <a href="0002-acks-isr-bila-selamat.html">0002 · acks &amp; ISR</a></span><span>Next: Day 5 · Idempotence &amp; ordering</span></nav>
+</main>
+<script defer src="../assets/quiz.js"></script>
+</body>
+</html>

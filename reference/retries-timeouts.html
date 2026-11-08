@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rujukan · Retries &amp; timeouts</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<header class="lesson">
+  <div class="kicker">Rujukan · Reliability</div>
+  <h1>Retries &amp; timeouts</h1>
+  <p class="lede">Empat setting yang nampak macam semua tentang "bila send fail", tapi cuma satu yang betul² tentukan. Default untuk Kafka 4.x dan librdkafka; sila sahkan dengan docs versi ko.</p>
+</header>
+
+<h3>Default</h3>
+<table>
+  <tr><th>Java</th><th>Default</th><th>librdkafka</th><th>Default</th></tr>
+  <tr><td><code>retries</code></td><td>2147483647</td><td><code>message.send.max.retries</code> (= <code>retries</code>)</td><td>2147483647</td></tr>
+  <tr><td><code>retry.backoff.ms</code></td><td>100</td><td><code>retry.backoff.ms</code></td><td>100</td></tr>
+  <tr><td><code>retry.backoff.max.ms</code></td><td>1000</td><td><code>retry.backoff.max.ms</code></td><td>1000</td></tr>
+  <tr><td><code>request.timeout.ms</code></td><td>30000</td><td><code>request.timeout.ms</code></td><td>30000</td></tr>
+  <tr><td><code>delivery.timeout.ms</code></td><td>120000</td><td><code>message.timeout.ms</code> (= <code>delivery.timeout.ms</code>)</td><td>300000</td></tr>
+</table>
+<p><cite class="src"><a href="https://kafka.apache.org/documentation/#producerconfigs">Kafka producer configs</a> · <a href="https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md">librdkafka CONFIGURATION.md</a></cite></p>
+
+<h3>Siapa buat apa</h3>
+<table>
+  <tr><th>Setting</th><th>Kawal</th></tr>
+  <tr><td><code>delivery.timeout.ms</code></td><td>jam <strong>total</strong> satu record. Tamat = record fail (jalan B). <strong>Ni yang tentukan bila send fail.</strong></td></tr>
+  <tr><td><code>request.timeout.ms</code></td><td>berapa lama client tunggu <em>satu</em> response. Tamat = request dianggap gagal, retry kalau masa masih ada.</td></tr>
+  <tr><td><code>retry.backoff.ms</code> / <code>.max.ms</code></td><td>jeda antara retry (naik eksponen sampai max)</td></tr>
+  <tr><td><code>retries</code></td><td>had bilangan retry. Default hampir tak terhingga, so jarang jadi penentu.</td></tr>
+</table>
+
+<h3>Peraturan</h3>
+<ul>
+  <li>Java kena <code>delivery.timeout.ms ≥ linger.ms + request.timeout.ms</code>, kalau tak <code>ConfigException</code> masa construct producer.</li>
+  <li>Retriable (retry): <code>NotEnoughReplicas</code>, <code>NotLeaderOrFollower</code>, network error, request timeout.</li>
+  <li>Non-retriable (fail terus): <code>MessageTooLarge</code>, authorization error, dan sebagainya.</li>
+  <li>Request timeout = <strong>hasil tak pasti</strong>. Broker mungkin dah tulis. Retry boleh duplicate, melainkan idempotence on (Day 5).</li>
+  <li>Cara tune yang disyorkan: biar <code>retries</code> default, set <code>delivery.timeout.ms</code> ikut berapa lama ko sanggup tunggu.</li>
+</ul>
+
+<h3>Formula pantas</h3>
+<p>Minimum <code>delivery.timeout.ms</code> = <strong>linger.ms + request.timeout.ms</strong>.<br>
+Default: 5 + 30000 = 30005 ms. Default sebenar 120000 ms muat lebih kurang 4 cubaan penuh kalau broker senyap.</p>
+
+<nav class="nav"><span><a href="../index.html">⌂ Semua lesson</a></span><span>Diajar dalam: <a href="../lessons/0003-retries-timeouts-bila-send-fail.html">0003 · Retries &amp; timeouts</a></span></nav>
+</main>
+</body>
+</html>
